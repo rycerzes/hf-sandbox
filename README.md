@@ -14,7 +14,7 @@ sb.terminate()
 
 ## How it works
 
-`HFSandbox.create()` launches an HF Job that:
+`Sandbox.create()` launches an HF Job that:
 
 1. `pip install`s a tiny FastAPI RPC server (FastAPI + uvicorn)
 2. starts the server on `localhost:8000`
@@ -28,12 +28,12 @@ The client polls the job logs for the tunnel URL, then talks to the sandbox over
 ## Install
 
 ```bash
-pip install git+https://github.com/<your-org>/hf-sandbox.git
+pip install git+https://github.com/huggingface/hf-sandbox.git
 ```
 
 Requires `huggingface-cli login` (the same token is forwarded to the sandbox so it can access HF Hub).
 
 ## Limits
 
-- Image must have `pip` and `curl` (most do; alpine doesn't have curl by default).
+- Image must have Python + `pip` (used to install the RPC server and download `cloudflared`).
 - Cloudflare's free `trycloudflare.com` URLs are best-effort — fine for benchmarks, not production.
