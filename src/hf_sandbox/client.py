@@ -127,12 +127,12 @@ class Sandbox:
     @staticmethod
     def _wait_for_url(job_id: str, timeout: float = 300) -> str:
         deadline = time.time() + timeout
-        while time.time() < deadline:
-            for line in fetch_job_logs(job_id=job_id, follow=False):
-                m = _URL_RE.search(line)
-                if m:
-                    return m.group(0)
-            time.sleep(2)
+        for line in fetch_job_logs(job_id=job_id, follow=True):
+            m = _URL_RE.search(line)
+            if m:
+                return m.group(0)
+            if time.time() > deadline:
+                break
         raise TimeoutError(f"tunnel URL never appeared in logs for job {job_id}")
 
     def _wait_healthy(self, timeout: float = 60):

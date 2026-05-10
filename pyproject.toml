@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hf-sandbox"
-version = "0.1.0"
+version = "0.1.1"
 description = "Modal-style sandbox API on top of Hugging Face Jobs."
 requires-python = ">=3.10"
 dependencies = [
-    "huggingface_hub>=0.30",
+    "huggingface_hub>=1.5",
     "httpx",
     "dnspython",
 ]
