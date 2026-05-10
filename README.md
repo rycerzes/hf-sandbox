@@ -9,9 +9,9 @@ Modal-style sandbox API on top of Hugging Face Jobs.
 from hf_sandbox import Sandbox
 
 sb = Sandbox.create(image="python:3.12")
-proc = sb.exec("python", "-c", "print(1+1)"). # → CompletedProcess(returncode=0, stdout='2\n', ...)
+proc = sb.exec("python", "-c", "print(1+1)")  # → CompletedProcess(stdout='2\n', returncode=0, ...)
 sb.write_file("/tmp/foo.txt", "hello")
-print(sb.read_file("/tmp/foo.txt"))         . # → 'hello'
+print(sb.read_file("/tmp/foo.txt"))           # → 'hello'
 sb.terminate()
 ```
 
