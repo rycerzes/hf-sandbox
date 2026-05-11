@@ -34,7 +34,7 @@ The client polls the job logs for the tunnel URL, then talks to the sandbox over
 pip install hf-sandbox
 ```
 
-Requires `huggingface-cli login` (the same token is forwarded to the sandbox so it can access HF Hub).
+Requires `hf auth login` (the same token is forwarded to the sandbox so it can access HF Hub).
 
 ## Limits
 
