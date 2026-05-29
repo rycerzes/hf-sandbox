@@ -86,7 +86,7 @@ cat > /tmp/server.py << 'PYEOF'
 {_SERVER_SRC}
 PYEOF
 python -u /tmp/server.py &
-exec /tmp/cf tunnel --url http://localhost:8000 --no-autoupdate 2>&1
+exec /tmp/cf tunnel --no-autoupdate --url http://localhost:8000 2>&1
 """
 
 _BOOTSTRAP_NAMED = f"""set -e
@@ -97,7 +97,7 @@ cat > /tmp/server.py << 'PYEOF'
 {_SERVER_SRC}
 PYEOF
 python -u /tmp/server.py &
-exec /tmp/cf tunnel run --token $CF_TUNNEL_TOKEN --no-autoupdate 2>&1
+exec /tmp/cf tunnel --no-autoupdate run --token $CF_TUNNEL_TOKEN 2>&1
 """
 
 _URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
@@ -192,6 +192,9 @@ class Sandbox:
         if url is None:
             url = cls._wait_for_url(job.id)
             _register_public_dns_override(url.split("://", 1)[1].split("/", 1)[0])
+        else:
+            # Named tunnel: DNS record is new, local resolver may not have it yet
+            _register_public_dns_override(url.split("://", 1)[1].split("/", 1)[0])
 
         sb = cls(job.id, url, token,
                  cf_config=cf_config,
@@ -219,7 +222,7 @@ class Sandbox:
                 break
         raise TimeoutError(f"tunnel URL never appeared in logs for job {job_id}")
 
-    def _wait_healthy(self, timeout: float = 60):
+    def _wait_healthy(self, timeout: float = 120):
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
