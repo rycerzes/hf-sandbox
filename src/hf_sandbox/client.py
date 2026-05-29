@@ -2,18 +2,22 @@
 
 import atexit
 import base64
+import os
 import re
 import secrets
 import socket
 import subprocess
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import dns.resolver
 import httpx
 from huggingface_hub import cancel_job, fetch_job_logs, get_token, run_job
-from huggingface_hub.utils import send_telemetry
+from huggingface_hub.utils._telemetry import send_telemetry
+
+from hf_sandbox import cloudflare as cf_api
 
 _active: set["Sandbox"] = set()
 
@@ -85,17 +89,59 @@ python -u /tmp/server.py &
 exec /tmp/cf tunnel --url http://localhost:8000 --no-autoupdate 2>&1
 """
 
+_BOOTSTRAP_NAMED = f"""set -e
+pip install -q fastapi=={_FASTAPI_VERSION} uvicorn=={_UVICORN_VERSION}
+python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/cloudflare/cloudflared/releases/download/{_CLOUDFLARED_VERSION}/cloudflared-linux-amd64', '/tmp/cf')"
+chmod +x /tmp/cf
+cat > /tmp/server.py << 'PYEOF'
+{_SERVER_SRC}
+PYEOF
+python -u /tmp/server.py &
+exec /tmp/cf tunnel run --token $CF_TUNNEL_TOKEN --no-autoupdate 2>&1
+"""
+
 _URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 
 
+@dataclass
+class CloudflareConfig:
+    """Configuration for named Cloudflare Tunnels.
+
+    When CF_API_TOKEN is set, sandboxes use named tunnels (no rate limits).
+    When not set, falls back to quick tunnels (original zero-config behavior).
+    """
+    api_token: str       # CF API token with Tunnel:Edit + DNS:Edit
+    account_id: str      # CF account ID
+    zone_id: str         # CF zone ID for the domain
+    domain: str          # e.g., "rycerz.es"
+
+    @classmethod
+    def from_env(cls) -> "CloudflareConfig | None":
+        token = os.environ.get("CF_API_TOKEN")
+        if not token:
+            return None
+        return cls(
+            api_token=token,
+            account_id=os.environ["CF_ACCOUNT_ID"],
+            zone_id=os.environ["CF_ZONE_ID"],
+            domain=os.environ["CF_DOMAIN"],
+        )
+
+
 class Sandbox:
-    def __init__(self, job_id: str, url: str, token: str):
+    def __init__(self, job_id: str, url: str, token: str,
+                 cf_config: CloudflareConfig | None = None,
+                 tunnel_id: str | None = None,
+                 dns_record_id: str | None = None):
         self.job_id = job_id
         self.url = url
         self._http = httpx.Client(headers={"Authorization": f"Bearer {token}"})
         self._session_id = uuid.uuid4().hex
         self._started_at = time.time()
         self._terminated = False
+        self._cf_config = cf_config
+        self._tunnel_id = tunnel_id
+        self._dns_record_id = dns_record_id
 
     @classmethod
     def create(cls, image: str, flavor: str = "cpu-basic", timeout: str = "1h",
@@ -103,17 +149,54 @@ class Sandbox:
         token = secrets.token_urlsafe(32)
         job_secrets = {"HF_SANDBOX_TOKEN": token}
         if forward_hf_token:
-            job_secrets["HF_TOKEN"] = get_token()
+            hf_token = get_token()
+            if hf_token:
+                job_secrets["HF_TOKEN"] = hf_token
+
+        cf_config = CloudflareConfig.from_env()
+
+        if cf_config:
+            # Named tunnel path — no rate limits, deterministic URL
+            sandbox_id = uuid.uuid4().hex[:12]
+            hostname = f"sandbox-{sandbox_id}.{cf_config.domain}"
+            tunnel_id, tunnel_token = cf_api.create_tunnel(
+                cf_config.account_id, cf_config.api_token, f"sandbox-{sandbox_id}"
+            )
+            # CRITICAL: Must configure ingress BEFORE running the job.
+            # Without this, the remotely-managed tunnel has no routing rules
+            # and returns 503 for all requests.
+            cf_api.configure_tunnel_ingress(
+                cf_config.account_id, cf_config.api_token, tunnel_id, hostname
+            )
+            dns_record_id = cf_api.add_dns_route(
+                cf_config.zone_id, cf_config.api_token, tunnel_id, hostname
+            )
+            job_secrets["CF_TUNNEL_TOKEN"] = tunnel_token
+            bootstrap = _BOOTSTRAP_NAMED
+            url = f"https://{hostname}"
+        else:
+            # Fallback: quick tunnel (original zero-config behavior)
+            tunnel_id = None
+            dns_record_id = None
+            bootstrap = _BOOTSTRAP
+            url = None  # will be discovered from logs
+
         job = run_job(
             image=image,
-            command=["bash", "-c", _BOOTSTRAP],
+            command=["bash", "-c", bootstrap],
             secrets=job_secrets,
             flavor=flavor,
             timeout=timeout,
         )
-        url = cls._wait_for_url(job.id)
-        _register_public_dns_override(url.split("://", 1)[1].split("/", 1)[0])
-        sb = cls(job.id, url, token)
+
+        if url is None:
+            url = cls._wait_for_url(job.id)
+            _register_public_dns_override(url.split("://", 1)[1].split("/", 1)[0])
+
+        sb = cls(job.id, url, token,
+                 cf_config=cf_config,
+                 tunnel_id=tunnel_id,
+                 dns_record_id=dns_record_id)
         sb._wait_healthy()
         _active.add(sb)
         _telemetry("create", {
@@ -121,6 +204,7 @@ class Sandbox:
             "flavor": flavor,
             "timeout": timeout,
             "forward_hf_token": forward_hf_token,
+            "named_tunnel": cf_config is not None,
         })
         return sb
 
@@ -187,3 +271,21 @@ class Sandbox:
         self._http.close()
         cancel_job(job_id=self.job_id)
         _active.discard(self)
+
+        # Cleanup Cloudflare resources (named tunnels only)
+        if self._cf_config and self._tunnel_id:
+            if self._dns_record_id:
+                try:
+                    cf_api.delete_dns_record(
+                        self._cf_config.zone_id, self._cf_config.api_token,
+                        self._dns_record_id,
+                    )
+                except Exception:
+                    pass
+            try:
+                cf_api.delete_tunnel(
+                    self._cf_config.account_id, self._cf_config.api_token,
+                    self._tunnel_id,
+                )
+            except Exception:
+                pass
